@@ -1,0 +1,52 @@
+syntax = "proto3";
+package kv;
+
+option go_package = "github.com/Sjk4824/distributed_kv_store/api;api";
+
+service KV {
+  rpc Put(PutRequest) returns (PutResponse);
+  rpc Get(GetRequest) returns (GetResponse);
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
+
+message PutRequest {
+  string key = 1;
+  bytes value = 2;
+  string client_id = 3;
+  uint64 request_id = 4;
+}
+
+message PutResponse {
+  bool ok = 1;
+  string leader = 2;
+}
+
+message GetRequest {
+  string key = 1;
+}
+
+message GetResponse {
+  bool found = 1;
+  bytes value = 2;
+  string leader = 3;
+}
+
+message DeleteRequest {
+  string key = 1;
+  string client_id = 2;
+  uint64 request_id = 3;
+}
+
+message DeleteResponse {
+  bool ok = 1;
+  string leader = 2;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  string node_id = 1;
+  bool is_leader = 2;
+  uint64 term = 3;
+}
