@@ -69,3 +69,41 @@ func (s *Store) ApplyDelete(clientID string, reqId uint64, key string) bool {
 	s.seen[opKey] = struct{}{}
 	return true
 }
+
+// this is only for recovery purposes while we are using WAL to reconstruct our store.
+func (s *Store) ForcePut(key string, val []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	cpy := make([]byte, len(val))
+	copy(cpy, val)
+	s.data[key] = cpy
+}
+
+func (s *Store) ForceDelete(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	delete(s.data, key)
+}
+
+func (s *Store) MarkSeen(clientID string, reqId uint64) bool {
+	opKey := dedupeKey(clientID, reqId)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.seen[opKey]; ok {
+		return false
+	}
+
+	s.seen[opKey] = struct{}{}
+	return true
+}
+
+func (s *Store) UnmarkSeen(clientID string, reqId uint64) {
+	opKey := dedupeKey(clientID, reqId)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	delete(s.seen, opKey)
+}

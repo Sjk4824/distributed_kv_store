@@ -14,15 +14,20 @@ import (
 func main() {
 	addr := flag.String("addr", ":50051", "The address to listen on")
 	nodeID := flag.String("node", "node-1", "node id")
+	walPath := flag.String("wal", "./data/wal.log", "path to wal file")
+
 	flag.Parse()
 
 	lis, err := net.Listen("tcp", *addr)
 	if err != nil {
 		log.Fatalf("listen %s: %v", *addr, err)
 	}
-
-	store := kv.NewStore()
-	svc := kv.NewServer(store, *nodeID)
+	db, err := kv.OpenDurableStore(*walPath)
+	if err != nil {
+		log.Fatalf("open durable store method : %v", err)
+	}
+	defer db.Close()
+	svc := kv.NewServer(db, *nodeID)
 
 	grpcServer := grpc.NewServer()
 	api.RegisterKVServer(grpcServer, svc)

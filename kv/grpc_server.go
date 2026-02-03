@@ -10,12 +10,12 @@ import (
 
 type Server struct {
 	api.UnimplementedKVServer
-	Store  *Store
+	DB     *DurableStore
 	NodeID string
 }
 
-func NewServer(store *Store, nodeID string) *Server {
-	return &Server{Store: store, NodeID: nodeID}
+func NewServer(db *DurableStore, nodeID string) *Server {
+	return &Server{DB: db, NodeID: nodeID}
 }
 
 func (s *Server) Put(ctx context.Context, req *api.PutRequest) (*api.PutResponse, error) {
@@ -27,7 +27,7 @@ func (s *Server) Put(ctx context.Context, req *api.PutRequest) (*api.PutResponse
 		return nil, errors.New("client ID must be non empty")
 	}
 
-	_ = s.Store.ApplyPut(req.GetClientId(), req.GetRequestId(), key, req.GetValue())
+	_ = s.DB.Put(req.GetClientId(), req.GetRequestId(), key, req.GetValue())
 	return &api.PutResponse{Ok: true, Leader: ""}, nil
 }
 
@@ -36,7 +36,7 @@ func (s *Server) Get(ctx context.Context, req *api.GetRequest) (*api.GetResponse
 	if key == "" {
 		return nil, errors.New("key must be non empty")
 	}
-	val, ok := s.Store.Get(key)
+	val, ok := s.DB.Get(key)
 	if !ok {
 		return &api.GetResponse{Found: false, Value: nil, Leader: ""}, nil
 	}
@@ -54,7 +54,7 @@ func (s *Server) Delete(ctx context.Context, req *api.DeleteRequest) (*api.Delet
 		return nil, errors.New("clinet ID must be non empty")
 	}
 
-	_ = s.Store.ApplyDelete(req.GetClientId(), req.GetRequestId(), key)
+	_ = s.DB.Delete(req.GetClientId(), req.GetRequestId(), key)
 	return &api.DeleteResponse{Ok: true, Leader: ""}, nil
 }
 
