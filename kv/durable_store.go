@@ -19,6 +19,7 @@ type DurableStore struct {
 	stopCh    chan struct{}
 	doneCh    chan struct{}
 	mu        sync.Mutex
+	keepval   int
 }
 
 func OpenDurableStore(walPath string, snapEvery time.Duration) (*DurableStore, error) {
@@ -71,6 +72,7 @@ func OpenDurableStore(walPath string, snapEvery time.Duration) (*DurableStore, e
 
 	if snapEvery > 0 {
 		ds.snapEvery = snapEvery
+		ds.keepval = 3
 		ds.stopCh = make(chan struct{})
 		ds.doneCh = make(chan struct{})
 		go ds.snapshotLoop()
@@ -91,6 +93,9 @@ func (ds *DurableStore) Get(key string) ([]byte, bool) {
 }
 
 func (ds *DurableStore) Put(clientID string, reqId uint64, key string, val []byte) error {
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
+
 	if !ds.store.MarkSeen(clientID, reqId) {
 		return nil
 	}
@@ -105,6 +110,9 @@ func (ds *DurableStore) Put(clientID string, reqId uint64, key string, val []byt
 }
 
 func (ds *DurableStore) Delete(clientID string, reqId uint64, key string) error {
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
+
 	if !ds.store.MarkSeen(clientID, reqId) {
 		return nil
 	}
