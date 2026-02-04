@@ -3,24 +3,47 @@ package kv
 import (
 	"os"
 	"path/filepath"
+	"sync"
+	"time"
 
 	"github.com/Sjk4824/distributed_kv_store/storage"
 )
 
 type DurableStore struct {
-	store   *Store
-	wal     *storage.WAL
-	walPath string
+	store        *Store
+	wal          *storage.WAL
+	walPath      string
+	snapshotPath string
+
+	snapEvery time.Duration
+	stopCh    chan struct{}
+	doneCh    chan struct{}
+	mu        sync.Mutex
 }
 
-func OpenDurableStore(walPath string) (*DurableStore, error) {
+func OpenDurableStore(walPath string, snapEvery time.Duration) (*DurableStore, error) {
 	if dir := filepath.Dir(walPath); dir != "." {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return nil, err
 		}
 	}
 
+	dir := filepath.Dir(walPath)
+	snapshotPath := filepath.Join(dir, "snapshot.bin")
+
 	s := NewStore()
+
+	//we need to load the snapshot first
+	state, err := storage.ReadSnapshot(snapshotPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if state != nil {
+		for k, v := range state {
+			s.ForcePut(k, v)
+		}
+	}
 
 	if err := storage.Replay(walPath, func(rec storage.Record) error {
 		switch rec.Op {
@@ -39,13 +62,27 @@ func OpenDurableStore(walPath string) (*DurableStore, error) {
 		return nil, err
 	}
 
-	return &DurableStore{
-		store:   s,
-		wal:     w,
-		walPath: walPath,
-	}, nil
+	ds := &DurableStore{
+		store:        s,
+		wal:          w,
+		walPath:      walPath,
+		snapshotPath: snapshotPath,
+	}
+
+	if snapEvery > 0 {
+		ds.snapEvery = snapEvery
+		ds.stopCh = make(chan struct{})
+		ds.doneCh = make(chan struct{})
+		go ds.snapshotLoop()
+	}
+	return ds, nil
 }
+
 func (ds *DurableStore) Close() error {
+	if ds.stopCh != nil {
+		close(ds.stopCh)
+		<-ds.doneCh
+	}
 	return ds.wal.Close()
 }
 

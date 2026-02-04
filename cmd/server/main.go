@@ -15,6 +15,7 @@ func main() {
 	addr := flag.String("addr", ":50051", "The address to listen on")
 	nodeID := flag.String("node", "node-1", "node id")
 	walPath := flag.String("wal", "./data/wal.log", "path to wal file")
+	snapEvery := flag.Duration("snap_every", 0, "snapshot interval (e.g. 5s, 30s). 0 disables snapshots")
 
 	flag.Parse()
 
@@ -22,7 +23,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("listen %s: %v", *addr, err)
 	}
-	db, err := kv.OpenDurableStore(*walPath)
+	db, err := kv.OpenDurableStore(*walPath, *snapEvery)
 	if err != nil {
 		log.Fatalf("open durable store method : %v", err)
 	}

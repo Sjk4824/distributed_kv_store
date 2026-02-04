@@ -107,3 +107,18 @@ func (s *Store) UnmarkSeen(clientID string, reqId uint64) {
 
 	delete(s.seen, opKey)
 }
+
+// Create a deep copy of the entire in-memory store for snapshotting purposes.
+func (s *Store) Snapshot() map[string][]byte {
+	//we block writes while we are taking a snapshot of the memory state
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	cp := make(map[string][]byte)
+	for k, v := range s.data {
+		b := make([]byte, len(v))
+		copy(b, v)
+		cp[k] = b
+	}
+	return cp
+}
