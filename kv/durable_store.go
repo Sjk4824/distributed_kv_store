@@ -125,3 +125,17 @@ func (ds *DurableStore) Delete(clientID string, reqId uint64, key string) error 
 	ds.store.ForceDelete(key)
 	return nil
 }
+
+// ForcePut applies a put directly without wal (used for raft apply)
+func (ds *DurableStore) ForcePut(key string, val []byte) {
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
+	ds.store.ForcePut(key, val)
+}
+
+// ForceDelete applies a delete directly without wal (used for raft apply)
+func (ds *DurableStore) ForceDelete(key string) {
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
+	ds.store.ForceDelete(key)
+}

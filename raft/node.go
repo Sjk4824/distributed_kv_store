@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"math/rand"
+	"sort"
 	"sync"
 	"time"
 
@@ -45,6 +46,13 @@ type Node struct {
 	term     uint64
 	votedFor string
 	leaderID string
+	log      []*api.LogEntry
+
+	commitIndex uint64
+	lastApplied uint64
+
+	nextIndex  map[string]uint64
+	matchIndex map[string]uint64
 
 	resetElectionCh chan struct{}
 	stopCh          chan struct{}
@@ -67,6 +75,9 @@ func NewNode(id, addr string, peers []string) *Node {
 		resetElectionCh: make(chan struct{}, 1),
 		stopCh:          make(chan struct{}),
 		doneCh:          make(chan struct{}),
+		log:             make([]*api.LogEntry, 0),
+		nextIndex:       make(map[string]uint64),
+		matchIndex:      make(map[string]uint64),
 
 		electionMin: 1500 * time.Millisecond,
 		electionMax: 3000 * time.Millisecond,
@@ -224,6 +235,9 @@ func (n *Node) startElection() {
 	log.Printf("[raft %s] became CANDIDATE term=%d", n.id, n.term)
 	n.votedFor = n.id
 	n.leaderID = ""
+
+	lastIdx, lastTerm := n.lastLogIndexTermLocked()
+
 	n.mu.Unlock()
 
 	votes := 1 // self vote
@@ -246,8 +260,10 @@ func (n *Node) startElection() {
 				return
 			}
 			resp, err := c.RequestVote(ctx, &api.RequestVoteRequest{
-				CandidateId: n.id,
-				Term:        term,
+				CandidateId:  n.id,
+				Term:         term,
+				LastLogIndex: lastIdx,
+				LastLogTerm:  lastTerm,
 			})
 			if err != nil {
 				voteCh <- false
@@ -302,36 +318,165 @@ func (n *Node) sendHeartbeats() {
 	}
 	term := n.term
 	leaderID := n.id
+	leaderCommit := n.commitIndex
+
+	// Initialize nextIndex/matchIndex on first leader election
+	if len(n.nextIndex) == 0 {
+		lastIdx, _ := n.lastLogIndexTermLocked()
+		for _, p := range n.peers {
+			n.nextIndex[p] = lastIdx + 1
+			n.matchIndex[p] = 0
+		}
+	}
 	n.mu.Unlock()
 
+	// Send AppendEntries to each peer in parallel
+	var wg sync.WaitGroup
 	for _, p := range n.peers {
 		peer := p
+		wg.Add(1)
 		go func() {
-			c, err := n.getClient(peer)
-			if err != nil {
-				return
-			}
-
-			ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
-			defer cancel()
-
-			resp, err := c.AppendEntries(ctx, &api.AppendEntriesRequest{
-				LeaderId: leaderID,
-				Term:     term,
-			})
-			if err != nil {
-				return
-			}
-
-			// Higher term => step down
-			n.mu.Lock()
-			if resp.GetTerm() > n.term {
-				n.term = resp.GetTerm()
-				n.role = Follower
-				n.votedFor = ""
-				n.leaderID = ""
-			}
-			n.mu.Unlock()
+			defer wg.Done()
+			n.replicateToPeer(peer, term, leaderID, leaderCommit)
 		}()
 	}
+	wg.Wait()
+}
+
+func (n *Node) lastLogIndexTermLocked() (uint64, uint64) {
+	if len(n.log) == 0 {
+		return 0, 0
+	}
+	last := n.log[len(n.log)-1]
+	return last.GetIndex(), last.GetTerm()
+}
+
+func (n *Node) AppendLog(cmd *api.Command) uint64 {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	if n.role != Leader {
+		return 0
+	}
+
+	index := uint64(len(n.log)) + 1
+	entry := &api.LogEntry{
+		Term:  n.term,
+		Index: index,
+		Cmd:   cmd,
+	}
+	n.log = append(n.log, entry)
+	return index
+}
+
+func (n *Node) replicateToPeer(peer string, term uint64, leaderID string, leaderCommit uint64) {
+	n.mu.Lock()
+	nextIdx := n.nextIndex[peer]
+
+	var prevLogIdx, prevLogTerm uint64
+	if nextIdx > 1 {
+		prevLogIdx = nextIdx - 1
+		prevLogTerm = n.log[prevLogIdx-1].GetTerm()
+	}
+
+	var entriesToSend []*api.LogEntry
+	if nextIdx-1 < uint64(len(n.log)) {
+		entriesToSend = n.log[nextIdx-1:]
+	}
+	n.mu.Unlock()
+
+	c, err := n.getClient(peer)
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	resp, err := c.AppendEntries(ctx, &api.AppendEntriesRequest{
+		LeaderId:     leaderID,
+		Term:         term,
+		PrevLogIndex: prevLogIdx,
+		PrevLongTerm: prevLogTerm,
+		Entries:      entriesToSend,
+		LeaderCommit: leaderCommit,
+	})
+	if err != nil {
+		return
+	}
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	if resp.GetTerm() > n.term {
+		n.term = resp.GetTerm()
+		n.role = Follower
+		n.votedFor = ""
+		n.leaderID = ""
+		n.nextIndex = make(map[string]uint64)
+		n.matchIndex = make(map[string]uint64)
+		return
+	}
+
+	// Success: advance nextIndex and matchIndex
+	if resp.GetSuccess() {
+		n.matchIndex[peer] = resp.GetMatchIndec() // use the confirmed index from response
+		n.nextIndex[peer] = resp.GetMatchIndec() + 1
+		n.updateCommitIndex()
+	} else {
+		// Failure: decrement nextIndex and retry
+		if n.nextIndex[peer] > 1 {
+			n.nextIndex[peer]--
+		}
+	}
+
+}
+
+func (n *Node) updateCommitIndex() {
+	// Find the highest index that is replicated on a majority
+	if len(n.matchIndex) == 0 {
+		return
+	}
+
+	// Collect all matchIndex values
+	indices := make([]uint64, 0, len(n.matchIndex))
+	for _, idx := range n.matchIndex {
+		indices = append(indices, idx)
+	}
+	// Sort to find median
+	sort.Slice(indices, func(i, j int) bool { return indices[i] < indices[j] })
+
+	// Majority index is at position len/2 (e.g., 3 peers -> index at pos 1)
+	majorityIdx := indices[len(indices)/2]
+
+	// Only advance commitIndex if the entry is from current term
+	if majorityIdx > n.commitIndex && majorityIdx-1 < uint64(len(n.log)) {
+		if n.log[majorityIdx-1].GetTerm() == n.term {
+			n.commitIndex = majorityIdx
+			log.Printf("[raft %s] advanced commitIndex to %d", n.id, n.commitIndex)
+		}
+	}
+}
+
+// ApplyEntries applies all entries up to commitIndex to a callback
+// This is called by the KV server to apply committed commands
+func (n *Node) ApplyEntries(apply func(*api.LogEntry) error) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	for n.lastApplied < n.commitIndex {
+		n.lastApplied++
+		idx := n.lastApplied - 1
+		if idx >= uint64(len(n.log)) {
+			break // shouldn't happen, but be safe
+		}
+		entry := n.log[idx]
+		if entry == nil {
+			continue
+		}
+		if err := apply(entry); err != nil {
+			log.Printf("[raft %s] failed to apply entry %d: %v", n.id, entry.GetIndex(), err)
+			return err
+		}
+	}
+	return nil
 }

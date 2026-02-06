@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"strings"
+	"time"
 
 	"github.com/Sjk4824/distributed_kv_store/api"
 	"github.com/Sjk4824/distributed_kv_store/kv"
@@ -55,6 +56,17 @@ func main() {
 	}
 	defer db.Close()
 	svc := kv.NewServer(db, *nodeID, rn)
+
+	// Periodically apply committed entries from raft
+	go func() {
+		ticker := time.NewTicker(50 * time.Millisecond)
+		defer ticker.Stop()
+		for range ticker.C {
+			if err := svc.ApplyCommittedEntries(); err != nil {
+				log.Printf("error applying entries: %v", err)
+			}
+		}
+	}()
 
 	grpcServer := grpc.NewServer()
 	api.RegisterKVServer(grpcServer, svc)

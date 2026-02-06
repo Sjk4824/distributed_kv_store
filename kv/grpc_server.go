@@ -43,9 +43,27 @@ func (s *Server) Put(ctx context.Context, req *api.PutRequest) (*api.PutResponse
 		return &api.PutResponse{Ok: false, Leader: leader}, nil
 	}
 
-	if err := s.DB.Put(req.GetClientId(), req.GetRequestId(), key, req.GetValue()); err != nil {
-		return nil, err
+	// Create a command for raft logging
+	cmd := &api.Command{
+		ClientId:  req.GetClientId(),
+		RequestId: req.GetRequestId(),
+		Op: &api.Command_Put{
+			Put: &api.Put{
+				Key:   key,
+				Value: req.GetValue(),
+			},
+		},
 	}
+
+	// Log it on the leader
+	logIdx := s.Raft.AppendLog(cmd)
+	if logIdx == 0 {
+		// Lost leadership
+		return &api.PutResponse{Ok: false, Leader: ""}, nil
+	}
+
+	// TODO: In production, wait for commitIndex to reach logIdx before responding
+	// For now, return success immediately and let raft apply it asynchronously
 	return &api.PutResponse{Ok: true, Leader: ""}, nil
 }
 
@@ -80,9 +98,25 @@ func (s *Server) Delete(ctx context.Context, req *api.DeleteRequest) (*api.Delet
 		return &api.DeleteResponse{Ok: false, Leader: leader}, nil
 	}
 
-	if err := s.DB.Delete(req.GetClientId(), req.GetRequestId(), key); err != nil {
-		return nil, err
+	// Create a command for raft logging
+	cmd := &api.Command{
+		ClientId:  req.GetClientId(),
+		RequestId: req.GetRequestId(),
+		Op: &api.Command_Del{
+			Del: &api.Delete{
+				Key: key,
+			},
+		},
 	}
+
+	// Log it on the leader
+	logIdx := s.Raft.AppendLog(cmd)
+	if logIdx == 0 {
+		// Lost leadership
+		return &api.DeleteResponse{Ok: false, Leader: ""}, nil
+	}
+
+	// TODO: In production, wait for commitIndex to reach logIdx before responding
 	return &api.DeleteResponse{Ok: true, Leader: ""}, nil
 }
 
@@ -93,4 +127,32 @@ func (s *Server) Health(ctx context.Context, req *api.HealthRequest) (*api.Healt
 		IsLeader: isLeader,
 		Term:     term,
 	}, nil
+}
+
+// ApplyCommittedEntries applies raft log entries to the state machine
+func (s *Server) ApplyCommittedEntries() error {
+	if s.Raft == nil {
+		return nil
+	}
+
+	return s.Raft.ApplyEntries(func(entry *api.LogEntry) error {
+		cmd := entry.GetCmd()
+		if cmd == nil {
+			return nil
+		}
+
+		// Apply Put
+		if put := cmd.GetPut(); put != nil {
+			s.DB.ForcePut(put.GetKey(), put.GetValue())
+			return nil
+		}
+
+		// Apply Delete
+		if del := cmd.GetDel(); del != nil {
+			s.DB.ForceDelete(del.GetKey())
+			return nil
+		}
+
+		return nil
+	})
 }
